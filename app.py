@@ -15,7 +15,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 # ─────────────────────────────────────────────
-# 커스텀 CSS (모바일 최적화 포함)
+# 커스텀 CSS (모바일 최적화 및 색상 수정)
 # ─────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -74,9 +74,11 @@ st.markdown("""
         font-weight: 700;
         color: #e2e8f0;
     }
-    .metric-delta-pos { color: #34d399; font-size: 0.8rem; }
-    .metric-delta-neg { color: #f87171; font-size: 0.8rem; }
-    .metric-delta-neu { color: #94a3b8; font-size: 0.8rem; }
+    /* ▼▼▼▼▼▼▼▼▼▼▼ 색상 수정 ▼▼▼▼▼▼▼▼▼▼▼ */
+    .metric-delta-pos { color: #dc3545; font-size: 0.8rem; } /* 상승: 빨간색 */
+    .metric-delta-neg { color: #007bff; font-size: 0.8rem; } /* 하락: 파란색 */
+    .metric-delta-neu { color: #94a3b8; font-size: 0.8rem; } /* 변화 없음: 회색 */
+    /* ▲▲▲▲▲▲▲▲▲▲▲ 색상 수정 ▲▲▲▲▲▲▲▲▲▲▲ */
     /* 뉴스 섹션 */
     .news-title {
         font-size: 0.85rem;
@@ -314,7 +316,7 @@ KOREAN_TICKER_MAP = {
     "호텔신라": "008770.KS",
     "신세계": "004170.KS",
     "현대백화점": "069960.KS",
-    "롯데제과": "280360.KS",
+    "롯데웰푸드": "280360.KS", # 롯데제과에서 이름 변경
     "동원산업": "006040.KS",
     "삼양식품": "003230.KS",
     "오뚜기": "007310.KS",
@@ -369,8 +371,11 @@ def metric_html(label, value, delta=None):
     """커스텀 메트릭 HTML 블록"""
     delta_html = ""
     if delta is not None:
+        # ▼▼▼▼▼▼▼▼▼▼▼ 색상 수정 ▼▼▼▼▼▼▼▼▼▼▼
+        # 상승은 빨간색, 하락은 파란색 (한국 주식 시장 관례)
         cls = "metric-delta-pos" if delta > 0 else ("metric-delta-neg" if delta < 0 else "metric-delta-neu")
         sign = "▲" if delta > 0 else ("▼" if delta < 0 else "—")
+        # ▲▲▲▲▲▲▲▲▲▲▲ 색상 수정 ▲▲▲▲▲▲▲▲▲▲▲
         delta_html = f'<div class="{cls}">{sign} {abs(delta):.2f}%</div>'
     return f"""
     <div class="metric-container">
@@ -390,6 +395,10 @@ def fetch_stock_info(ticker_symbol: str):
 
 def fetch_google_news(query: str):
     """Google News RSS (fallback)"""
+    # Google News RSS 쿼리에 한글을 직접 넣으면 인코딩 문제나 검색 품질 저하가 있을 수 있어
+    # 일단 영어 회사명으로 검색을 시도하는 것이 좋습니다.
+    # 여기서는 입력받은 회사 이름 그대로 쿼리하므로, 매핑된 티커 심볼 대신 한글 이름을 쓰는 것이 더 자연스러울 수 있습니다.
+    # 그러나 yfinance 정보에서 longName을 가져와서 사용하는 것이 더 정확합니다.
     url = f"https://news.google.com/rss/search?q={query}+stock&hl=ko&gl=KR&ceid=KR:ko"
     feed = feedparser.parse(url)
     return feed.entries[:3]
@@ -529,19 +538,20 @@ for sym in tickers_to_display:
     st.markdown('<div class="stock-card">', unsafe_allow_html=True)
     
     # 종목명 + 가격 헤더
+    # ▼▼▼▼▼▼▼▼▼▼▼ 색상 수정 ▼▼▼▼▼▼▼▼▼▼▼
     price_color = "#e2e8f0" # 기본 색상
     chg_icon = ""
     chg_str = ""
     
     if chg_pct is not None:
         if chg_pct > 0:
-            price_color = "#34d399"
+            price_color = "#dc3545" # 상승: 빨간색
             chg_icon = "▲"
         elif chg_pct < 0:
-            price_color = "#f87171"
+            price_color = "#007bff" # 하락: 파란색
             chg_icon = "▼"
         chg_str = f"{chg_icon} {abs(chg_abs):,.2f} ({abs(chg_pct):.2f}%)"
-    
+    # ▲▲▲▲▲▲▲▲▲▲▲ 색상 수정 ▲▲▲▲▲▲▲▲▲▲▲
     price_str = f"{cur}{price:,.2f}" if price is not None else "—"
 
     st.markdown(
@@ -555,8 +565,6 @@ for sym in tickers_to_display:
     )
     
     # ── 지표 메트릭 2행 ────────────────────────
-    # Streamlit의 columns는 고정된 비율을 따르므로, 모바일에서 쌓이도록 직접적인 CSS 조정은 어렵습니다.
-    # 대신, @media 쿼리에서 stHorizontalBlock의 flex-direction을 column으로 변경하여 쌓이게 합니다.
     cols1 = st.columns(5)
     metrics_row1 = [
         ("거래량", fmt_number(info.get("volume"), decimals=0)),
@@ -584,31 +592,38 @@ for sym in tickers_to_display:
     news_items = []
     
     # yfinance 뉴스 (우선)
+    # yfinance의 news API가 항상 안정적인 데이터를 제공하지는 않을 수 있습니다.
     if news:
         for article in news[:3]:
             title = article.get("title", "")
             link = article.get("link", "#")
             pub = article.get("publisher", "")
-            if title:
+            if title and link: # 제목과 링크가 모두 있어야 유효한 뉴스
                 news_items.append((title, link, pub))
                 
-    # 부족하면 Google News RSS 보충. yfinance의 longName 또는 입력받은 한글 이름을 쿼리에 사용
-    if len(news_items) < 3:
-        # 뉴스 검색 쿼리는 회사 이름 (yfinance에서 가져온 긴 이름)으로 하는 것이 더 효과적일 수 있습니다.
-        news_query = info.get("longName") or info.get("shortName") or name 
+    # 부족하면 Google News RSS 보충
+    # Google News 쿼리는 yfinance에서 가져온 'longName'을 사용하는 것이 가장 효과적입니다.
+    # longName이 없으면 shortName, 그마저도 없으면 티커 심볼을 사용합니다.
+    news_query_term = info.get("longName") or info.get("shortName") or sym
+    
+    if len(news_items) < 3: # 3개 뉴스를 채울 때까지 시도
         try:
-            for entry in fetch_google_news(news_query): # 쿼리를 회사 이름으로 변경
+            google_news_entries = fetch_google_news(news_query_term)
+            for entry in google_news_entries:
                 title = entry.get("title", "")
                 link = entry.get("link", "#")
+                
+                # source가 딕셔너리 형태일 수도 있고, 아닐 수도 있으므로 안전하게 처리
                 source_data = entry.get("source", {})
                 source = source_data.get("title", "Google News") if isinstance(source_data, dict) else "Google News"
-                if title and len(news_items) < 3:
+                
+                if title and link and (title, link, source) not in news_items and len(news_items) < 3: # 중복 방지 및 3개 제한
                     news_items.append((title, link, source))
         except Exception:
-            pass # Google News 오류는 조용히 넘어감
+            pass # Google News API 오류는 무시
 
     if news_items:
-        for title, link, source in news_items[:3]:
+        for title, link, source in news_items[:3]: # 최종적으로 3개만 표시
             st.markdown(
                 f'<div class="news-item">'
                 f' <a href="{link}" target="_blank">{title}</a>'
