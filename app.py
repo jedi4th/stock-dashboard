@@ -74,11 +74,11 @@ st.markdown("""
         font-weight: 700;
         color: #e2e8f0;
     }
-    /* ▼▼▼▼▼▼▼▼▼▼▼ 색상 수정 ▼▼▼▼▼▼▼▼▼▼▼ */
+    /* ▼▼▼▼▼▼▼▼▼▼▼ 색상 재확인 (상승: 빨간색, 하락: 파란색) ▼▼▼▼▼▼▼▼▼▼▼ */
     .metric-delta-pos { color: #dc3545; font-size: 0.8rem; } /* 상승: 빨간색 */
     .metric-delta-neg { color: #007bff; font-size: 0.8rem; } /* 하락: 파란색 */
     .metric-delta-neu { color: #94a3b8; font-size: 0.8rem; } /* 변화 없음: 회색 */
-    /* ▲▲▲▲▲▲▲▲▲▲▲ 색상 수정 ▲▲▲▲▲▲▲▲▲▲▲ */
+    /* ▲▲▲▲▲▲▲▲▲▲▲ 색상 재확인 ▲▲▲▲▲▲▲▲▲▲▲ */
     /* 뉴스 섹션 */
     .news-title {
         font-size: 0.85rem;
@@ -339,6 +339,10 @@ KOREAN_TICKER_MAP = {
     "알리바바": "9988.HK", # 홍콩
 }
 
+# 티커 심볼을 한글 회사명으로 역매핑하는 딕셔너리 (뉴스 검색 쿼리용)
+TICKER_TO_KOREAN_NAME_MAP = {v: k for k, v in KOREAN_TICKER_MAP.items()}
+
+
 # 기본으로 표시할 7종목 (한글 회사명)
 # KOREAN_TICKER_MAP에 정의된 이름만 사용해야 합니다.
 DEFAULT_DISPLAY_COMPANIES = [
@@ -371,11 +375,9 @@ def metric_html(label, value, delta=None):
     """커스텀 메트릭 HTML 블록"""
     delta_html = ""
     if delta is not None:
-        # ▼▼▼▼▼▼▼▼▼▼▼ 색상 수정 ▼▼▼▼▼▼▼▼▼▼▼
         # 상승은 빨간색, 하락은 파란색 (한국 주식 시장 관례)
         cls = "metric-delta-pos" if delta > 0 else ("metric-delta-neg" if delta < 0 else "metric-delta-neu")
         sign = "▲" if delta > 0 else ("▼" if delta < 0 else "—")
-        # ▲▲▲▲▲▲▲▲▲▲▲ 색상 수정 ▲▲▲▲▲▲▲▲▲▲▲
         delta_html = f'<div class="{cls}">{sign} {abs(delta):.2f}%</div>'
     return f"""
     <div class="metric-container">
@@ -391,15 +393,62 @@ def fetch_stock_info(ticker_symbol: str):
     tk = yf.Ticker(ticker_symbol)
     info = tk.info
     news = tk.news # 최근 뉴스 리스트
+    
+    # ▼▼▼▼▼▼▼▼▼▼▼ PER, PBR, EPS 계산 로직 추가 ▼▼▼▼▼▼▼▼▼▼▼
+    # yfinance.info가 한국 주식에 대해 이 값을 직접 제공하지 않는 경우가 많음
+    # 재무제표를 파싱하여 직접 계산 시도
+    trailingPE = info.get("trailingPE")
+    priceToBook = info.get("priceToBook")
+    trailingEps = info.get("trailingEps")
+
+    try:
+        if not trailingEps:
+            # EPS 계산 시도: 순이익(Net Income) / 발행주식수(Shares Outstanding)
+            # yfinance는 TTM (Trailing Twelve Months) 순이익을 바로 제공하지 않으므로,
+            # 최신 연간 재무제표의 순이익과 발행주식수를 사용합니다.
+            financials = tk.financials.loc["Net Income"] if "Net Income" in tk.financials.index else None
+            shares_outstanding = tk.info.get("sharesOutstanding") # 현재 발행 주식수
+            if financials is not None and not financials.empty and shares_outstanding:
+                latest_net_income = financials.iloc[0] # 최신 연간 순이익
+                if latest_net_income and shares_outstanding > 0:
+                    trailingEps = latest_net_income / shares_outstanding
+                    info["trailingEps"] = trailingEps # info 딕셔너리에 추가
+                    
+        if not trailingPE and trailingEps and info.get("currentPrice"):
+            # PER = 현재주가 / EPS
+            if trailingEps > 0: # EPS가 양수일 때만 유효
+                trailingPE = info["currentPrice"] / trailingEps
+                info["trailingPE"] = trailingPE
+
+        if not priceToBook and info.get("currentPrice"):
+            # PBR = 현재주가 / 주당순자산 (Book Value Per Share)
+            # 주당순자산 = 총자산(Total Assets) - 총부채(Total Liabilities) / 발행주식수
+            balance_sheet = tk.balance_sheet
+            shares_outstanding = tk.info.get("sharesOutstanding")
+            if not balance_sheet.empty and shares_outstanding and shares_outstanding > 0:
+                latest_assets = balance_sheet.loc["Total Assets"].iloc[0] if "Total Assets" in balance_sheet.index else 0
+                latest_liabilities = balance_sheet.loc["Total Liabilities"].iloc[0] if "Total Liabilities" in balance_sheet.index else 0
+                if latest_assets and latest_liabilities:
+                    book_value = latest_assets - latest_liabilities
+                    if book_value > 0:
+                        book_value_per_share = book_value / shares_outstanding
+                        if book_value_per_share > 0:
+                            priceToBook = info["currentPrice"] / book_value_per_share
+                            info["priceToBook"] = priceToBook
+
+    except Exception as e:
+        # st.warning(f"{ticker_symbol} PER/PBR/EPS 계산 중 오류 발생: {e}") # 디버깅용
+        pass # 계산 오류는 무시하고 None으로 남겨둠
+
+    # ▲▲▲▲▲▲▲▲▲▲▲ PER, PBR, EPS 계산 로직 추가 ▲▲▲▲▲▲▲▲▲▲▲
+
     return info, news
 
 def fetch_google_news(query: str):
     """Google News RSS (fallback)"""
-    # Google News RSS 쿼리에 한글을 직접 넣으면 인코딩 문제나 검색 품질 저하가 있을 수 있어
-    # 일단 영어 회사명으로 검색을 시도하는 것이 좋습니다.
-    # 여기서는 입력받은 회사 이름 그대로 쿼리하므로, 매핑된 티커 심볼 대신 한글 이름을 쓰는 것이 더 자연스러울 수 있습니다.
-    # 그러나 yfinance 정보에서 longName을 가져와서 사용하는 것이 더 정확합니다.
-    url = f"https://news.google.com/rss/search?q={query}+stock&hl=ko&gl=KR&ceid=KR:ko"
+    # Google News RSS는 한글 쿼리를 더 잘 처리하는 경향이 있습니다.
+    # hl=ko, gl=KR은 한국어 결과 우선 및 한국 지역 설정을 의미합니다.
+    url = f"https://news.google.com/rss/search?q={query}+주식&hl=ko&gl=KR&ceid=KR:ko"
     feed = feedparser.parse(url)
     return feed.entries[:3]
 
@@ -538,7 +587,7 @@ for sym in tickers_to_display:
     st.markdown('<div class="stock-card">', unsafe_allow_html=True)
     
     # 종목명 + 가격 헤더
-    # ▼▼▼▼▼▼▼▼▼▼▼ 색상 수정 ▼▼▼▼▼▼▼▼▼▼▼
+    # ▼▼▼▼▼▼▼▼▼▼▼ 색상 재확인 (상승: 빨간색, 하락: 파란색) ▼▼▼▼▼▼▼▼▼▼▼
     price_color = "#e2e8f0" # 기본 색상
     chg_icon = ""
     chg_str = ""
@@ -551,7 +600,7 @@ for sym in tickers_to_display:
             price_color = "#007bff" # 하락: 파란색
             chg_icon = "▼"
         chg_str = f"{chg_icon} {abs(chg_abs):,.2f} ({abs(chg_pct):.2f}%)"
-    # ▲▲▲▲▲▲▲▲▲▲▲ 색상 수정 ▲▲▲▲▲▲▲▲▲▲▲
+    # ▲▲▲▲▲▲▲▲▲▲▲ 색상 재확인 ▲▲▲▲▲▲▲▲▲▲▲
     price_str = f"{cur}{price:,.2f}" if price is not None else "—"
 
     st.markdown(
@@ -569,9 +618,9 @@ for sym in tickers_to_display:
     metrics_row1 = [
         ("거래량", fmt_number(info.get("volume"), decimals=0)),
         ("시가총액", fmt_number(info.get("marketCap"), decimals=1, prefix=cur, billions=True)),
-        ("PER (TTM)", fmt_number(info.get("trailingPE"), decimals=2)),
-        ("PBR", fmt_number(info.get("priceToBook"), decimals=2)),
-        ("EPS (TTM)", fmt_number(info.get("trailingEps"), decimals=2, prefix=cur)),
+        ("PER (TTM)", fmt_number(info.get("trailingPE"), decimals=2)), # 계산된 값 또는 info의 값
+        ("PBR", fmt_number(info.get("priceToBook"), decimals=2)),     # 계산된 값 또는 info의 값
+        ("EPS (TTM)", fmt_number(info.get("trailingEps"), decimals=2, prefix=cur)), # 계산된 값 또는 info의 값
     ]
     for col, (lbl, val) in zip(cols1, metrics_row1):
         col.markdown(metric_html(lbl, val), unsafe_allow_html=True)
@@ -591,8 +640,8 @@ for sym in tickers_to_display:
     st.markdown('<div class="news-title">📰 주요 뉴스</div>', unsafe_allow_html=True)
     news_items = []
     
+    # ▼▼▼▼▼▼▼▼▼▼▼ 뉴스 로직 강화 (한글 키워드 구글 RSS 우선) ▼▼▼▼▼▼▼▼▼▼▼
     # yfinance 뉴스 (우선)
-    # yfinance의 news API가 항상 안정적인 데이터를 제공하지는 않을 수 있습니다.
     if news:
         for article in news[:3]:
             title = article.get("title", "")
@@ -602,25 +651,33 @@ for sym in tickers_to_display:
                 news_items.append((title, link, pub))
                 
     # 부족하면 Google News RSS 보충
-    # Google News 쿼리는 yfinance에서 가져온 'longName'을 사용하는 것이 가장 효과적입니다.
-    # longName이 없으면 shortName, 그마저도 없으면 티커 심볼을 사용합니다.
-    news_query_term = info.get("longName") or info.get("shortName") or sym
+    # Google News 쿼리는 TICKER_TO_KOREAN_NAME_MAP에서 한글 이름을 먼저 찾고,
+    # 없으면 yfinance에서 가져온 longName/shortName을 사용합니다.
+    korean_company_name = TICKER_TO_KOREAN_NAME_MAP.get(sym.upper()) # 현재 티커의 한글 이름
+    english_company_name = info.get("longName") or info.get("shortName")
     
-    if len(news_items) < 3: # 3개 뉴스를 채울 때까지 시도
+    news_query_term = korean_company_name if korean_company_name else english_company_name
+    if not news_query_term: # 한글/영어 이름 모두 없으면 티커 심볼 사용
+        news_query_term = sym
+
+    if len(news_items) < 3 and news_query_term: # 3개 뉴스를 채울 때까지 시도
         try:
             google_news_entries = fetch_google_news(news_query_term)
             for entry in google_news_entries:
                 title = entry.get("title", "")
                 link = entry.get("link", "#")
                 
-                # source가 딕셔너리 형태일 수도 있고, 아닐 수도 있으므로 안전하게 처리
                 source_data = entry.get("source", {})
                 source = source_data.get("title", "Google News") if isinstance(source_data, dict) else "Google News"
                 
-                if title and link and (title, link, source) not in news_items and len(news_items) < 3: # 중복 방지 및 3개 제한
+                # 중복 방지 및 3개 제한
+                if title and link and (title, link, source) not in news_items and len(news_items) < 3:
                     news_items.append((title, link, source))
-        except Exception:
+        except Exception as e:
+            # print(f"Google News를 불러오는 중 오류 발생 for {news_query_term}: {e}") # 디버깅용
             pass # Google News API 오류는 무시
+
+    # ▲▲▲▲▲▲▲▲▲▲▲ 뉴스 로직 강화 ▲▲▲▲▲▲▲▲▲▲▲
 
     if news_items:
         for title, link, source in news_items[:3]: # 최종적으로 3개만 표시
@@ -632,7 +689,7 @@ for sym in tickers_to_display:
                 unsafe_allow_html=True,
             )
     else:
-        st.markdown('<p style="color:#4a5378;font-size:0.85rem;">뉴스를 불러올 수 없습니다.</p>', unsafe_allow_html=True)
+        st.markdown('<p style="color:#4a5378;font-size:0.85rem;">뉴스를 불러올 수 없습니다. (데이터 부족 또는 검색 실패)</p>', unsafe_allow_html=True)
         
     st.markdown(
         f'<div class="update-time">🕐 {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} 기준</div>',
